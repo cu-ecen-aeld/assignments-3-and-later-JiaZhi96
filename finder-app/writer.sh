@@ -18,6 +18,10 @@ fi
 if [ ! -e ${WRITE_FILE} ]
 then
     touch ${WRITE_FILE}
+    if [ $? -neq 0 ]
+    then
+        exit 1
+    fi
 fi
 
 echo ${WRITE_STR} > ${WRITE_FILE}

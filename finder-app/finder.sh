@@ -16,7 +16,7 @@ then
 fi
 
 NUM_OF_OCCURENCE=$(grep -o ${SEARCH_STR} ${FILES_DIR}/* | wc -l)
-NUM_OF_FILES=$(grep -l ${SEARCH_STR} ${FILES_DIR}/* | wc -l)
+NUM_OF_FILES=$(find ${FILES_DIR} -maxdepth 1 -type f | wc -l)
 
 echo "The number of files are ${NUM_OF_FILES} and the number of matching lines are ${NUM_OF_OCCURENCE}"
 
