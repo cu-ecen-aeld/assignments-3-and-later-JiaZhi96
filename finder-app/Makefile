@@ -1,8 +1,7 @@
 compiler?=$(CROSS_COMPILE)gcc
 
 all:
-	$(compiler) -g -Wall -c -o writer.o writer.c
-	$(compiler) -g -Wall -I/ writer.o -o writer
+	${CC} ${CFLAGS} ${INCLUDES} ${OBJS} -o writer ${LDFLAGS} writer.c
 
 clean:
 	rm -f *.o writer *.elf *.map
