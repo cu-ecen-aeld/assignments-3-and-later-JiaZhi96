@@ -8,12 +8,166 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <signal.h>
+#include <time.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdbool.h>
 
-static int m_signalReceived = 0;
+static bool m_signalReceived = 0;
+
+struct timerParam {
+    pthread_mutex_t *fileMutex;
+    FILE *fp;
+};
+
+struct socketParam {
+    pthread_t thread;
+    int acceptedFd;
+    uint8_t ipv4[4];
+    pthread_mutex_t *fileMutex;
+    FILE *fp;
+    bool *stopFlag;
+};
+
+struct node {
+    struct socketParam data;
+    struct node* next;
+};
+
 void handleSignal(int signum) {
     m_signalReceived = 1;
+}
+
+static void* socketThread(void *threadParam) {
+    struct socketParam* param = (struct socketParam*)threadParam;
+    int acceptedFd = param->acceptedFd;
+    uint8_t *ipv4 = param->ipv4;
+    pthread_mutex_t *fileMutex = param->fileMutex;
+    FILE *fp = param->fp;
+    bool *stopFlag = param->stopFlag;
+    int isHasError = 0;
+
+    char *recvBuf = malloc(4096);
+    if (recvBuf == NULL) {
+        syslog(LOG_ERR, "malloc failed");
+        return threadParam;
+    }
+
+    syslog(LOG_INFO, "Accepted connection from %u.%u.%u.%u", ipv4[0], ipv4[1], ipv4[2], ipv4[3]);
+    while (!(*stopFlag) && !isHasError) {
+        int rc;
+        ssize_t recvLen = recv(acceptedFd, recvBuf, 4096, 0);
+        if (recvLen == -1) {
+            syslog(LOG_ERR, "recv error: %s", strerror(errno));
+            if (errno == EINTR) {
+                isHasError = 1;
+                break;
+            }
+        } else if (recvLen == 0) {
+            syslog(LOG_ERR, "socket closed");
+            break;
+        }
+        
+        int isEndCharFound = 0;
+        size_t writeLen = recvLen;
+        char *endChar = memchr(recvBuf, '\n', recvLen);
+        if (endChar != NULL) {
+            writeLen = (endChar - recvBuf) + 1;
+            isEndCharFound = 1;
+        }
+
+        if((rc = pthread_mutex_lock(fileMutex)) != 0) {
+            syslog(LOG_ERR, "Failed to lock mutex, rc:%d", rc);
+            isHasError = true;
+            break;
+        }
+
+        size_t writtenLen = fwrite(recvBuf, sizeof(char), writeLen, fp);
+        if(writtenLen != writeLen) {
+            syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
+            isHasError = 1;
+        }
+
+        if (isEndCharFound && !isHasError) {
+            long writePos = ftell(fp);
+
+            int ret = fseek(fp, 0, SEEK_SET);
+            if (ret != 0) {
+                syslog(LOG_ERR, "fseek error: %s", strerror(errno));
+                isHasError = 1;
+            }
+            
+            size_t readLen;
+            do {
+                readLen = fread(recvBuf, sizeof(char), 4095, fp);
+                recvBuf[readLen] = '\0';
+                ssize_t sendLen = send(acceptedFd, recvBuf, readLen, 0);
+                if (sendLen == -1) {
+                    syslog(LOG_ERR, "send error: %s", strerror(errno));
+                    isHasError = 1;
+                    break;
+                }
+                printf("%s", recvBuf);
+            } while(readLen == 4095);
+
+            int ferrVal = ferror(fp);
+            if (ferrVal != 0) {
+                syslog(LOG_ERR, "fread error: %d", ferrVal);
+                isHasError = 1;
+            }
+
+            ret = fseek(fp, writePos, SEEK_SET);
+            if (ret != 0) {
+                syslog(LOG_ERR, "fseek error: %s", strerror(errno));
+                isHasError = 1;
+            }
+        }
+
+        if((rc = pthread_mutex_unlock(fileMutex)) != 0) {
+            syslog(LOG_ERR, "Failed to unlock mutex, rc:%d", rc);
+            isHasError = true;
+            break;
+        }
+    }
+    free(recvBuf);
+    close(acceptedFd);
+    syslog(LOG_ERR, "Close connection from %u.%u.%u.%u", ipv4[0], ipv4[1], ipv4[2], ipv4[3]);
+
+    return threadParam;
+}
+
+static void insertNode(struct node* head, struct node* newNode) {
+    struct node** lastNodePtr = &head;
+    while((*lastNodePtr) != NULL) {
+        lastNodePtr = &(head->next);
+    }
+    *lastNodePtr = newNode;
+}
+
+static int injectNewThread(struct node* head, int acceptedFd, uint8_t* ipv4, pthread_mutex_t *fileMutex, FILE *fp, bool* stopFlag)
+{
+    struct node* newNode = calloc(1, sizeof(struct node));
+    if (newNode == NULL) {
+        syslog(LOG_ERR, "new thead node malloc failed");
+        return -1;
+    }
+
+    newNode->data.acceptedFd = acceptedFd;
+    newNode->data.fileMutex = fileMutex;
+    newNode->data.fp = fp;
+    memcpy(newNode->data.ipv4, ipv4, 4);
+    newNode->data.stopFlag = stopFlag;
+
+    int rc = pthread_create(&newNode->data.thread, NULL, socketThread, &newNode->data);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Failed to create thread:%d", rc);
+        free(newNode);
+        return -1;
+    }
+
+    insertNode(head, newNode);
+    return 0;
 }
 
 int redirectStdIo(void) {
@@ -57,6 +211,68 @@ int redirectStdIo(void) {
         
     close(devNullInFd);
     close(devNullOutFd);
+
+    return 0;
+}
+
+static void timerThread(union sigval sigval)
+{
+    struct timerParam *param = (struct timerParam*) sigval.sival_ptr;
+    pthread_mutex_t *fileMutex = param->fileMutex;
+    FILE *fp = param->fp;
+    int rc;
+
+    if((rc = pthread_mutex_lock(fileMutex)) != 0) {
+        syslog(LOG_ERR, "Failed to lock mutex, rc:%d", rc);
+        return;
+    }
+
+    char timeBuf[80];
+    time_t rawTime;
+    struct tm localTime;
+    time(&rawTime);
+    localtime_r(&rawTime, &localTime);
+
+    size_t timeSize = strftime(timeBuf, sizeof(timeBuf), "timestamp:%Y-%m-%d %H%M\n", &localTime);
+
+    size_t writtenLen = fwrite(timeBuf, sizeof(char), timeSize, fp);
+    if(writtenLen != timeSize) {
+        syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
+    }
+
+    if((rc = pthread_mutex_unlock(fileMutex)) != 0) {
+        syslog(LOG_ERR, "Failed to unlock mutex, rc:%d", rc);
+    }
+
+    return;
+}
+
+int startTimer(timer_t *timerId, struct timerParam *param)
+{
+    struct sigevent sev;
+    int ret;
+    memset(&sev, 0, sizeof(struct sigevent));
+
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_value.sival_ptr = param;
+    sev.sigev_notify_function = timerThread;
+    if ((ret = timer_create(CLOCK_MONOTONIC, &sev, timerId)) != 0) {
+        syslog(LOG_ERR, "timer create failed:%d", ret);
+        return -1;
+    }
+
+    struct itimerspec timespec;
+    memset(&timespec, 0, sizeof(struct itimerspec));
+    timespec.it_value.tv_sec = 10;
+    timespec.it_interval.tv_sec = 10;
+    if ((ret = timer_settime(*timerId, 0, &timespec, NULL)) != 0) {
+        syslog(LOG_ERR, "timer settime failed %d", ret);
+        int rc;
+        if ((rc = timer_delete(*timerId)) != 0) {
+            syslog(LOG_ERR, "timer delete failed %d", rc);
+        }
+        return -1;
+    }
 
     return 0;
 }
@@ -121,10 +337,11 @@ int main(int argc, char **argv)
         syslog(LOG_ERR, "listen error: %s", strerror(errno));
         exit(-1);
     }
-   
-    char *recvBuf = malloc(4096);
-    if (recvBuf == NULL) {
-        syslog(LOG_ERR, "malloc failed");
+
+    struct node* head = NULL;
+    pthread_mutex_t fileMutex;
+    if ((status = pthread_mutex_init(&fileMutex, NULL)) != 0) {
+        syslog(LOG_ERR, "Mutex create err:%d", status);
         exit(-1);
     }
 
@@ -132,10 +349,19 @@ int main(int argc, char **argv)
     FILE *fp = fopen(bufFile, "w+");
     if (NULL == fp) {
         syslog(LOG_ERR, "Failed to open file %s", bufFile);
+        exit(-1);
     }
 
-    int isHasError = 0;
-    while (!m_signalReceived && !isHasError) {
+    timer_t timerId;
+    struct timerParam timerParam;
+    timerParam.fileMutex = &fileMutex;
+    timerParam.fp = fp;
+    if ((status = startTimer(&timerId, &timerParam)) != 0) {
+        syslog(LOG_ERR, "Failed to start timer");
+        exit(-1);
+    }
+
+    while (!m_signalReceived) {
         struct sockaddr clientAddr;
         memset(&clientAddr, 0, sizeof(clientAddr));
         socklen_t clientAddrLen = 0;
@@ -147,83 +373,30 @@ int main(int argc, char **argv)
 
         struct sockaddr_in *clientAddrIn = (struct sockaddr_in*)(&clientAddr);
         uint8_t *ipV4Val = (uint8_t*)(&(clientAddrIn->sin_addr));
-        syslog(LOG_INFO, "Accepted connection from %u.%u.%u.%u", ipV4Val[0], ipV4Val[1], ipV4Val[2], ipV4Val[3]);
 
-
-        while (!m_signalReceived && !isHasError) {
-            ssize_t recvLen = recv(acceptedFd, recvBuf, 4096, 0);
-            if (recvLen == -1) {
-                syslog(LOG_ERR, "recv error: %s", strerror(errno));
-                if (errno == EINTR) {
-                    isHasError = 1;
-                    break;
-                }
-            } else if (recvLen == 0) {
-                syslog(LOG_ERR, "socket closed");
-                break;
-            }
-            
-            int isEndCharFound = 0;
-            size_t writeLen = recvLen;
-            char *endChar = memchr(recvBuf, '\n', recvLen);
-            if (endChar != NULL) {
-                writeLen = (endChar - recvBuf) + 1;
-                isEndCharFound = 1;
-            }
-
-            size_t writtenLen = fwrite(recvBuf, sizeof(char), writeLen, fp);
-            if(writtenLen != writeLen) {
-                syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
-                isHasError = 1;
-                break;
-            }
-
-            if (isEndCharFound) {
-                long writePos = ftell(fp);
-
-                int ret = fseek(fp, 0, SEEK_SET);
-                if (ret != 0) {
-                    syslog(LOG_ERR, "fseek error: %s", strerror(errno));
-                    isHasError = 1;
-                }
-                
-                size_t readLen;
-                do {
-                    readLen = fread(recvBuf, sizeof(char), 4095, fp);
-                    recvBuf[readLen] = '\0';
-                    ssize_t sendLen = send(acceptedFd, recvBuf, readLen, 0);
-                    if (sendLen == -1) {
-                        syslog(LOG_ERR, "send error: %s", strerror(errno));
-                        isHasError = 1;
-                        break;
-                    }
-                    printf("%s", recvBuf);
-                } while(readLen == 4095);
-    
-                int ferrVal = ferror(fp);
-                if (ferrVal != 0) {
-                    syslog(LOG_ERR, "fread error: %d", ferrVal);
-                    isHasError = 1;
-                    break;
-                }
-
-                ret = fseek(fp, writePos, SEEK_SET);
-                if (ret != 0) {
-                    syslog(LOG_ERR, "fseek error: %s", strerror(errno));
-                    isHasError = 1;
-                }
-            }
+        // start thread
+        int ret = injectNewThread(head, acceptedFd, ipV4Val, &fileMutex, fp, &m_signalReceived);
+        if (ret != 0) {
+            close(acceptedFd);
+            break;
         }
-
-        close(acceptedFd);
-        syslog(LOG_ERR, "Close connection from %u.%u.%u.%u", ipV4Val[0], ipV4Val[1], ipV4Val[2], ipV4Val[3]);
     }
 
-    free(recvBuf);
+    struct node* tail = head;
+    while (tail != NULL) {
+        struct node* currNode = tail;
+        if ((status = pthread_join(currNode->data.thread, NULL)) != 0) {
+            uint8_t *ipv4 = currNode->data.ipv4;
+            syslog(LOG_ERR, "join thread for %u.%u.%u.%u err:%d", ipv4[0], ipv4[1], ipv4[2], ipv4[3], status);
+        }
+        tail = tail->next;
+        free(currNode);
+    }
+
+    timer_delete(timerId);
     fclose(fp);
     remove(bufFile);
     close(so);
-    // complet open connection, close close socket, delete /var/tmp/aesdsocketdata
     syslog(LOG_ERR, "Caught signal, exiting");
 
     exit(0);
