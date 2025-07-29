@@ -16,6 +16,15 @@
 
 #include "aesd-circular-buffer.h"
 
+static uint8_t get_next_offset(uint8_t curr_offs)
+{
+    if(++curr_offs >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+        curr_offs = 0;
+    }
+
+    return curr_offs;
+}
+
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
  * @param char_offset the position to search for in the buffer list, describing the zero referenced
@@ -29,10 +38,22 @@
 struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    /**
-    * TODO: implement per description
-    */
-    return NULL;
+    uint8_t read_offs = buffer->out_offs;
+    size_t total_offs = 0;
+    struct aesd_buffer_entry *return_entry = NULL;
+    
+    do {
+        struct aesd_buffer_entry *read_entry = &(buffer->entry[read_offs]);
+        if((total_offs + read_entry->size - 1) >= char_offset) {
+            *entry_offset_byte_rtn = char_offset - total_offs;
+            return_entry = read_entry;
+            break;
+        }
+        total_offs += read_entry->size;
+        read_offs = get_next_offset(read_offs);
+    } while(read_offs != buffer->in_offs);
+
+    return return_entry;
 }
 
 /**
@@ -44,9 +65,18 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 */
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    /**
-    * TODO: implement per description
-    */
+    struct aesd_buffer_entry *in_entry = &(buffer->entry[buffer->in_offs]);
+    in_entry->buffptr = add_entry->buffptr;
+    in_entry->size = add_entry->size;
+    
+    // Overwrite oldest value if buffer is full
+    if(buffer->out_offs == buffer->in_offs) {
+        buffer->out_offs = get_next_offset(buffer->out_offs);
+    }
+
+    buffer->in_offs = get_next_offset(buffer->in_offs);
+
+    buffer->full = (buffer->out_offs == buffer->in_offs);
 }
 
 /**
