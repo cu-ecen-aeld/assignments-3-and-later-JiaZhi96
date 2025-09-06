@@ -14,12 +14,16 @@
 #include <pthread.h>
 #include <stdbool.h>
 
+#define USE_AESD_CHAR_DEVICE
+
 static bool m_signalReceived = 0;
 
+#ifndef USE_AESD_CHAR_DEVICE
 struct timerParam {
     pthread_mutex_t *fileMutex;
     FILE *fp;
 };
+#endif
 
 struct socketParam {
     pthread_t thread;
@@ -215,6 +219,7 @@ int redirectStdIo(void) {
     return 0;
 }
 
+#ifndef USE_AESD_CHAR_DEVICE
 static void timerThread(union sigval sigval)
 {
     struct timerParam *param = (struct timerParam*) sigval.sival_ptr;
@@ -276,6 +281,7 @@ int startTimer(timer_t *timerId, struct timerParam *param)
 
     return 0;
 }
+#endif
 
 int main(int argc, char **argv)
 {
@@ -345,13 +351,18 @@ int main(int argc, char **argv)
         exit(-1);
     }
 
+#ifdef USE_AESD_CHAR_DEVICE
+    const char bufFile[] = "/dev/aesdchar";
+#else
     const char bufFile[] = "/var/tmp/aesdsocketdata";
+#endif
     FILE *fp = fopen(bufFile, "w+");
     if (NULL == fp) {
         syslog(LOG_ERR, "Failed to open file %s", bufFile);
         exit(-1);
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     timer_t timerId;
     struct timerParam timerParam;
     timerParam.fileMutex = &fileMutex;
@@ -360,6 +371,7 @@ int main(int argc, char **argv)
         syslog(LOG_ERR, "Failed to start timer");
         exit(-1);
     }
+#endif
 
     while (!m_signalReceived) {
         struct sockaddr clientAddr;
@@ -393,9 +405,13 @@ int main(int argc, char **argv)
         free(currNode);
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     timer_delete(timerId);
+#endif
     fclose(fp);
+#ifndef USE_AESD_CHAR_DEVICE
     remove(bufFile);
+#endif
     close(so);
     syslog(LOG_ERR, "Caught signal, exiting");
 
