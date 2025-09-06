@@ -83,6 +83,67 @@ const char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, 
     return out_buff;
 }
 
+bool aesd_circular_buffer_get_offset(struct aesd_circular_buffer *buffer, size_t entry_idx, size_t last_offset, size_t *out_total_offs)
+{
+    bool is_overflow = false;
+    uint8_t avail_entry;
+    if(buffer->full) {
+        avail_entry = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    } else if(buffer->in_offs < buffer->out_offs) {
+        avail_entry = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - buffer->out_offs + buffer->in_offs;
+    } else {
+        avail_entry = buffer->in_offs - buffer->out_offs;
+    }
+
+    struct aesd_buffer_entry *entry;
+    uint8_t read_offs = buffer->out_offs;
+    size_t total_offs = 0;
+
+    // entry_idx is zero indexed, so must be minus on of avail_entry
+    if(entry_idx < avail_entry) {
+        size_t num_entry = entry_idx + 1;
+        while(num_entry--) {
+            entry = &buffer->entry[read_offs];
+            total_offs += entry->size;
+            read_offs = get_next_offset(read_offs);
+        }
+
+        if(last_offset <= entry->size) {
+            // last offset is added in while loop above, have to be deducated
+            total_offs = total_offs - entry->size + last_offset;
+            *out_total_offs = total_offs;
+        } else {
+            is_overflow = true;
+        }
+    } else {
+        is_overflow = true;
+    }
+
+    return is_overflow;
+}
+
+size_t aesd_circular_buffer_get_total_size(struct aesd_circular_buffer *buffer)
+{
+    uint8_t avail_entry;
+    if(buffer->full) {
+        avail_entry = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    } else if(buffer->in_offs < buffer->out_offs) {
+        avail_entry = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - buffer->out_offs + buffer->in_offs;
+    } else {
+        avail_entry = buffer->in_offs - buffer->out_offs;
+    }
+
+    uint8_t read_offs = buffer->out_offs;
+    size_t total_offs = 0;
+    while(avail_entry--) {
+        struct aesd_buffer_entry *entry = &buffer->entry[read_offs];
+        total_offs += entry->size;
+        read_offs = get_next_offset(read_offs);
+    }
+
+    return total_offs;
+}
+
 /**
 * Initializes the circular buffer described by @param buffer to an empty struct
 */

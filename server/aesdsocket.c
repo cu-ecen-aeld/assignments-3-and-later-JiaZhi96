@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define USE_AESD_CHAR_DEVICE
 
@@ -49,6 +50,48 @@ void handleSignal(int signum) {
     m_signalReceived = 1;
 }
 
+#ifdef USE_AESD_CHAR_DEVICE
+static bool handleAesdIocSeek(const char *input, int acceptedFd) {
+    uint32_t cmdIdx, offset;
+    int scannedItems = sscanf(input, "AESDCHAR_IOCSEEKTO:%u,%u", &cmdIdx, &offset);
+
+    if (scannedItems == 2) {
+        struct aesd_seekto seekto_data;
+        seekto_data.write_cmd = cmdIdx;
+        seekto_data.write_cmd_offset = offset;
+
+        int fd = open(BUF_FILE_NAME, O_RDWR);
+        if (fd) {
+            if (ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto_data) < 0) {
+                syslog(LOG_ERR, "Failed ioctl %s", strerror(errno));    
+            } else {
+                char recvBuf[64];
+                ssize_t readLen;
+                do {
+                    readLen = read(fd, recvBuf, 64);
+                    if(readLen < 0) {
+                        syslog(LOG_ERR, "read error: %d", strerror(errno));
+                        break;
+                    }
+
+                    ssize_t sendLen = send(acceptedFd, recvBuf, readLen, 0);
+                    if (sendLen < 0) {
+                        syslog(LOG_ERR, "send error: %s", strerror(errno));
+                        break;
+                    }
+                } while(readLen > 0);
+            }
+        } else {
+            syslog(LOG_ERR, "Failed to open for ioctl");
+        }
+
+        return true;
+    } else {
+        return false;
+    }
+}
+#endif
+
 static void* socketThread(void *threadParam) {
     struct socketParam* param = (struct socketParam*)threadParam;
     int acceptedFd = param->acceptedFd;
@@ -78,28 +121,32 @@ static void* socketThread(void *threadParam) {
             syslog(LOG_ERR, "socket closed");
             break;
         }
-        
-        int isEndCharFound = 0;
-        size_t writeLen = recvLen;
-        char *endChar = memchr(recvBuf, '\n', recvLen);
-        if (endChar != NULL) {
-            writeLen = (endChar - recvBuf) + 1;
-            isEndCharFound = 1;
-        }
 
-        if((rc = pthread_mutex_lock(fileMutex)) != 0) {
-            syslog(LOG_ERR, "Failed to lock mutex, rc:%d", rc);
-            isHasError = true;
-            break;
-        }
-
-        size_t writtenLen = fwrite(recvBuf, sizeof(char), writeLen, fp);
-        if(writtenLen != writeLen) {
-            syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
-            isHasError = 1;
-        }
+        int isEndCharFound = false;
 #ifdef USE_AESD_CHAR_DEVICE
-        fflush(fp);
+        if (!handleAesdIocSeek(recvBuf, acceptedFd)) {
+#endif
+            size_t writeLen = recvLen;
+            char *endChar = memchr(recvBuf, '\n', recvLen);
+            if (endChar != NULL) {
+                writeLen = (endChar - recvBuf) + 1;
+                isEndCharFound = true;
+            }
+
+            if((rc = pthread_mutex_lock(fileMutex)) != 0) {
+                syslog(LOG_ERR, "Failed to lock mutex, rc:%d", rc);
+                isHasError = true;
+                break;
+            }
+
+            size_t writtenLen = fwrite(recvBuf, sizeof(char), writeLen, fp);
+            if(writtenLen != writeLen) {
+                syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
+                isHasError = 1;
+            }
+#ifdef USE_AESD_CHAR_DEVICE
+            fflush(fp);
+        }
 #endif
 
         if (isEndCharFound && !isHasError) {
