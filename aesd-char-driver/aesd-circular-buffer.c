@@ -59,24 +59,28 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 /**
 * Adds entry @param add_entry to @param buffer in the location specified in buffer->in_offs.
 * If the buffer was already full, overwrites the oldest entry and advances buffer->out_offs to the
-* new start location.
+* new start location, then return the overwritten buffer pointer.
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+const char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
+    const char *out_buff = NULL;    
+
+    // Overwrite oldest value if buffer is full
+    if(buffer->full && (buffer->out_offs == buffer->in_offs)) {
+        out_buff = buffer->entry[buffer->out_offs].buffptr;
+        buffer->out_offs = get_next_offset(buffer->out_offs);
+    }
+
     struct aesd_buffer_entry *in_entry = &(buffer->entry[buffer->in_offs]);
     in_entry->buffptr = add_entry->buffptr;
     in_entry->size = add_entry->size;
-    
-    // Overwrite oldest value if buffer is full
-    if(buffer->out_offs == buffer->in_offs) {
-        buffer->out_offs = get_next_offset(buffer->out_offs);
-    }
 
     buffer->in_offs = get_next_offset(buffer->in_offs);
 
     buffer->full = (buffer->out_offs == buffer->in_offs);
+    return out_buff;
 }
 
 /**
