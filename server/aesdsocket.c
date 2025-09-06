@@ -18,6 +18,12 @@
 
 static bool m_signalReceived = 0;
 
+#ifdef USE_AESD_CHAR_DEVICE
+const char BUF_FILE_NAME[] = "/dev/aesdchar";
+#else
+const char BUF_FILE_NAME[] = "/var/tmp/aesdsocketdata";
+#endif
+
 #ifndef USE_AESD_CHAR_DEVICE
 struct timerParam {
     pthread_mutex_t *fileMutex;
@@ -94,6 +100,14 @@ static void* socketThread(void *threadParam) {
         }
 
         if (isEndCharFound && !isHasError) {
+#ifdef USE_AESD_CHAR_DEVICE
+            FILE *readFp = fopen(BUF_FILE_NAME, "r");
+            if (NULL == fp) {
+                syslog(LOG_ERR, "Failed to open file for read %s", BUF_FILE_NAME);
+                isHasError = 1;
+            }
+#else
+            FILE *readFp = fp
             long writePos = ftell(fp);
 
             int ret = fseek(fp, 0, SEEK_SET);
@@ -101,31 +115,36 @@ static void* socketThread(void *threadParam) {
                 syslog(LOG_ERR, "fseek error: %s", strerror(errno));
                 isHasError = 1;
             }
+#endif
             
-            size_t readLen;
-            do {
-                readLen = fread(recvBuf, sizeof(char), 4095, fp);
+            // Set to non-zero value
+            size_t readLen = 4095;
+            while(!isHasError && readLen != 0) {
+                readLen = fread(recvBuf, sizeof(char), 4095, readFp);
                 recvBuf[readLen] = '\0';
                 ssize_t sendLen = send(acceptedFd, recvBuf, readLen, 0);
                 if (sendLen == -1) {
                     syslog(LOG_ERR, "send error: %s", strerror(errno));
                     isHasError = 1;
-                    break;
                 }
                 printf("%s", recvBuf);
-            } while(readLen == 4095);
+            };
 
-            int ferrVal = ferror(fp);
+            int ferrVal = ferror(readFp);
             if (ferrVal != 0) {
                 syslog(LOG_ERR, "fread error: %d", ferrVal);
                 isHasError = 1;
             }
 
+#ifdef USE_AESD_CHAR_DEVICE
+            fclose(readFp);
+#else
             ret = fseek(fp, writePos, SEEK_SET);
             if (ret != 0) {
                 syslog(LOG_ERR, "fseek error: %s", strerror(errno));
                 isHasError = 1;
             }
+#endif
         }
 
         if((rc = pthread_mutex_unlock(fileMutex)) != 0) {
@@ -351,14 +370,9 @@ int main(int argc, char **argv)
         exit(-1);
     }
 
-#ifdef USE_AESD_CHAR_DEVICE
-    const char bufFile[] = "/dev/aesdchar";
-#else
-    const char bufFile[] = "/var/tmp/aesdsocketdata";
-#endif
-    FILE *fp = fopen(bufFile, "w+");
+    FILE *fp = fopen(BUF_FILE_NAME, "w+");
     if (NULL == fp) {
-        syslog(LOG_ERR, "Failed to open file %s", bufFile);
+        syslog(LOG_ERR, "Failed to open file %s", BUF_FILE_NAME);
         exit(-1);
     }
 
@@ -410,7 +424,7 @@ int main(int argc, char **argv)
 #endif
     fclose(fp);
 #ifndef USE_AESD_CHAR_DEVICE
-    remove(bufFile);
+    remove(BUF_FILE_NAME);
 #endif
     close(so);
     syslog(LOG_ERR, "Caught signal, exiting");
