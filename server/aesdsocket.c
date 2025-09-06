@@ -98,6 +98,9 @@ static void* socketThread(void *threadParam) {
             syslog(LOG_ERR, "fwrite error: %s", strerror(errno));
             isHasError = 1;
         }
+#ifdef USE_AESD_CHAR_DEVICE
+        fflush(fp);
+#endif
 
         if (isEndCharFound && !isHasError) {
 #ifdef USE_AESD_CHAR_DEVICE
